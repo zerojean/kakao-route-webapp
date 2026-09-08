@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+__pycache__/
+*.py[cod]
+.venv/
+database/
+results/
+*.db
+*.db-*
+*.xlsx
+*.zip
+*.log
+.pytest_cache/
