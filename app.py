@@ -7,6 +7,7 @@ import hmac
 import pandas as pd
 import streamlit as st
 from settings import get_setting
+from cloud_history import cloud_enabled, StorageError
 from openpyxl import load_workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 
@@ -22,6 +23,7 @@ from result_history import (
     initialize_result_history,
     remove_missing_file_records,
     save_result_file,
+    read_result_file,
 )
 
 st.set_page_config(page_title="카카오 노선 조회기", layout="wide")
@@ -175,19 +177,40 @@ def build_failure_dataframe(result_df: pd.DataFrame) -> pd.DataFrame:
 
 def show_history_page() -> None:
     st.title("조회 이력")
-    st.caption("저장된 결과를 다시 내려받을 수 있습니다. 영구 저장소가 연결되지 않은 배포에서는 재배포 시 이력이 사라질 수 있으므로 결과를 다운로드해 보관하세요.")
+    if cloud_enabled():
+        st.caption("비공개 클라우드 저장소의 공용 조회 이력입니다. 접속 비밀번호를 아는 사람끼리 공유합니다.")
+    else:
+        st.warning("현재 서버에만 저장됩니다. 재배포 전에 결과를 다운로드하세요. 영구 저장소 연결이 필요합니다.")
+    if cloud_enabled():
+        with st.expander("기존 PC 조회 결과 복원"):
+            st.caption("기존 ZIP의 results 폴더에 있는 엑셀만 복원합니다. API 키와 프로그램 파일은 업로드하지 않습니다. 동일한 결과는 중복 저장하지 않습니다.")
+            backup = st.file_uploader("기존 앱 백업 ZIP", type=["zip"], key="legacy_backup")
+            if backup is not None:
+                from legacy_import import legacy_results, import_results
+                try:
+                    candidates = legacy_results(backup.getvalue())
+                    st.write(f"복원할 결과 파일: {len(candidates)}개")
+                    if st.button("비공개 저장소로 복원"):
+                        added = import_results(candidates)
+                        st.success(f"{added}개 복원 완료. 아래 목록에서 확인하세요.")
+                except (ValueError, StorageError) as exc:
+                    st.error(str(exc))
 
     controls1, controls2 = st.columns([1, 4])
     with controls1:
         if st.button("목록 새로고침"):
             st.rerun()
     with controls2:
-        if st.button("없는 파일 이력 정리"):
+        if not cloud_enabled() and st.button("없는 파일 이력 정리"):
             removed = remove_missing_file_records()
             st.success(f"파일이 없는 이력 {removed}건을 정리했습니다.")
             st.rerun()
 
-    history = get_result_history()
+    try:
+        history = get_result_history()
+    except StorageError as exc:
+        st.error(str(exc))
+        return
     if not history:
         st.info("저장된 조회 결과가 없습니다.")
         return
@@ -206,23 +229,34 @@ def show_history_page() -> None:
                 st.metric("조회 건수", f"{item['row_count']:,}")
                 st.caption(f"성공 {item['success_count']:,} / 확인 필요 {item['failure_count']:,}")
             with right:
-                if file_path.exists():
+                if "storage_path" in item and st.button("결과 파일 불러오기", key=f"load_{item['id']}"):
+                    try:
+                        st.session_state[f"file_{item['id']}"] = read_result_file(item)
+                    except StorageError as exc:
+                        st.error(str(exc))
+                file_bytes = st.session_state.get(f"file_{item['id']}") if "storage_path" in item else (file_path.read_bytes() if file_path.exists() else None)
+                if file_bytes is not None:
                     st.download_button(
                         "결과 다운로드",
-                        data=file_path.read_bytes(),
+                        data=file_bytes,
                         file_name=item["result_file_name"],
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key=f"download_{item['id']}",
                         width="stretch",
                     )
-                else:
+                elif "storage_path" not in item:
                     st.error("파일 없음")
                 if st.button(
-                    "이력·파일 삭제",
+                    "목록에서 삭제" if cloud_enabled() else "이력·파일 삭제",
                     key=f"delete_{item['id']}",
                     width="stretch",
                 ):
-                    if delete_result_history(item["id"], delete_file=True):
+                    try:
+                        deleted = delete_result_history(item["id"], delete_file=True)
+                    except StorageError as exc:
+                        st.error(str(exc))
+                        deleted = False
+                    if deleted:
                         st.success("삭제했습니다.")
                         st.rerun()
                     else:
@@ -306,6 +340,7 @@ def show_lookup_page() -> None:
             st.dataframe(input_df.head(20), width="stretch")
 
             if st.button("일괄 조회 시작", type="primary"):
+                st.session_state.pop("latest_result", None)
                 if not selected_vehicles:
                     st.warning("조회할 차종을 한 개 이상 선택하세요.")
                     return
@@ -344,6 +379,7 @@ def show_lookup_page() -> None:
 
                 success_count = int((result_df["API상태"] == "OK").sum())
                 failure_count = len(failure_df)
+                st.session_state["latest_result"] = (result_file, uploaded_file.name)
                 saved = save_result_file(
                     file_bytes=result_file,
                     original_file_name=uploaded_file.name,
@@ -362,9 +398,8 @@ def show_lookup_page() -> None:
                 detail_box.empty()
                 st.success(
                     f"조회 완료: 정상 경로 {success_count}건, 주소 확인 필요 {failure_count}건\n\n"
-                    f"결과 파일이 results 폴더에 자동 저장되었습니다."
+                    + ("결과를 비공개 클라우드에 저장했습니다." if cloud_enabled() else "결과를 현재 서버에 저장했습니다. 영구 저장소는 아직 연결되지 않았습니다.")
                 )
-                st.code(saved["result_file_path"], language=None)
                 st.dataframe(result_df, width="stretch")
                 if not failure_df.empty:
                     st.warning("좌표를 찾지 못한 주소는 '주소정제필요' 시트에 정리했습니다.")
@@ -377,6 +412,9 @@ def show_lookup_page() -> None:
                 )
         except Exception as exc:
             st.error(f"엑셀 처리 중 오류가 발생했습니다: {type(exc).__name__} - {exc}")
+            if "latest_result" in st.session_state:
+                content, filename = st.session_state["latest_result"]
+                st.download_button("마지막 조회 결과 다운로드", content, file_name="결과_" + filename)
 
 
 page = st.sidebar.radio(

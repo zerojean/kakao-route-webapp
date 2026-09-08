@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from settings import DATABASE_DIR, RESULTS_DIR, DB_PATH
+from cloud_history import CloudHistory, cloud_enabled
 
 
 def initialize_result_history() -> None:
@@ -47,6 +48,14 @@ def save_result_file(
     failure_count: int,
     job_name: Optional[str] = None,
 ) -> Dict[str, Any]:
+    if cloud_enabled():
+        return CloudHistory().save(file_bytes, {
+            "job_name": sanitize_file_stem(job_name or Path(original_file_name).stem),
+            "original_file_name": original_file_name,
+            "result_file_name": sanitize_file_stem(Path(original_file_name).stem) + "_결과.xlsx",
+            "row_count": int(row_count), "success_count": int(success_count),
+            "failure_count": int(failure_count),
+        })
     initialize_result_history()
 
     from uuid import uuid4
@@ -102,6 +111,8 @@ def save_result_file(
 
 
 def get_result_history() -> List[Dict[str, Any]]:
+    if cloud_enabled():
+        return CloudHistory().list()
     initialize_result_history()
 
     with sqlite3.connect(DB_PATH) as connection:
@@ -140,6 +151,8 @@ def get_result_record(history_id: int) -> Optional[Dict[str, Any]]:
 
 
 def delete_result_history(history_id: int, delete_file: bool = True) -> bool:
+    if cloud_enabled():
+        return CloudHistory().delete(history_id)
     record = get_result_record(history_id)
     if not record:
         return False
@@ -163,6 +176,8 @@ def delete_result_history(history_id: int, delete_file: bool = True) -> bool:
 
 
 def remove_missing_file_records() -> int:
+    if cloud_enabled():
+        return 0
     removed = 0
     for record in get_result_history():
         if not Path(record["result_file_path"]).exists():
@@ -174,3 +189,9 @@ def remove_missing_file_records() -> int:
                 connection.commit()
             removed += 1
     return removed
+
+
+def read_result_file(record):
+    if "storage_path" in record:
+        return CloudHistory().download(record)
+    return Path(record["result_file_path"]).read_bytes()
