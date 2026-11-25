@@ -667,7 +667,8 @@ def _route_distance_toll_cached(
     dy: float,
     car_type: int,
 ) -> Tuple[Optional[float], Optional[float], Optional[int]]:
-    check_api_keys()
+    if not KAKAO_MOBILITY_REST_API_KEY:
+        raise RuntimeError("카카오모빌리티 API 키가 설정되지 않았습니다.")
 
     url = "https://apis-navi.kakaomobility.com/v1/directions"
     headers = {"Authorization": f"KakaoAK {KAKAO_MOBILITY_REST_API_KEY}"}
@@ -779,18 +780,32 @@ def _endpoint_result(
     }
 
 
+COORD_COLUMNS = {"출발지위도", "출발지경도", "도착지위도", "도착지경도"}
+
+def direct_coordinate_result(address, xy):
+    x, y, note = normalize_xy(*xy)
+    return {
+        "원본주소": address, "조회주소": "", "API검색어": "",
+        "정제단계": "좌표직접입력", "좌표상태": "성공" if x is not None else "실패",
+        "경도": x, "위도": y, "좌표메모": note or "",
+        "캐시사용여부": "N", "조회소요시간_초": 0.0,
+    }
+
+
 def lookup_route(
     origin: str,
     destination: str,
     vehicle_name: str,
+    origin_xy=None,
+    destination_xy=None,
 ) -> Dict[str, Any]:
     total_started_at = time.perf_counter()
 
     vehicle_name = str(vehicle_name).strip()
     car_type = VEHICLE_TYPE_MAP.get(vehicle_name)
 
-    origin_result = geocode_with_cleaning(origin)
-    destination_result = geocode_with_cleaning(destination)
+    origin_result = direct_coordinate_result(origin, origin_xy) if origin_xy is not None else geocode_with_cleaning(origin)
+    destination_result = direct_coordinate_result(destination, destination_xy) if destination_xy is not None else geocode_with_cleaning(destination)
 
     result = {
         "출발지": origin,
@@ -828,7 +843,7 @@ def lookup_route(
             "예상시간_분": None,
             "톨비_원": None,
             "경로캐시사용여부": "N",
-            "API상태": "지오코딩 실패",
+            "API상태": "좌표 입력 오류" if origin_xy is not None or destination_xy is not None else "지오코딩 실패",
             "전체조회소요시간_초": round(
                 time.perf_counter() - total_started_at,
                 4,
@@ -901,11 +916,9 @@ def lookup_routes_from_df(
     source_df = df.copy()
     source_df.columns = source_df.columns.map(str).str.strip()
 
-    required = {"출발지", "도착지"}
-    if not required.issubset(source_df.columns):
-        raise ValueError(
-            "엑셀에는 '출발지', '도착지' 컬럼이 반드시 있어야 합니다."
-        )
+    coordinate_mode = COORD_COLUMNS.issubset(source_df.columns)
+    if not coordinate_mode and not {"출발지", "도착지"}.issubset(source_df.columns):
+        raise ValueError("출발지·도착지 주소 또는 출발지위도, 출발지경도, 도착지위도, 도착지경도 4개 컬럼이 필요합니다.")
 
     vehicles = [
         str(value).strip()
@@ -933,6 +946,8 @@ def lookup_routes_from_df(
                 str(row_dict.get("출발지", "")),
                 str(row_dict.get("도착지", "")),
                 vehicle_name,
+                origin_xy=(row_dict.get("출발지경도"), row_dict.get("출발지위도")) if coordinate_mode else None,
+                destination_xy=(row_dict.get("도착지경도"), row_dict.get("도착지위도")) if coordinate_mode else None,
             )
 
             combined = dict(row_dict)
