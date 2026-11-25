@@ -13,6 +13,7 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 
 from kakao_route_service import (
     VEHICLE_TYPE_MAP,
+    COORD_COLUMNS,
     lookup_route,
     lookup_routes_from_df,
 )
@@ -161,16 +162,18 @@ def build_failure_dataframe(result_df: pd.DataFrame) -> pd.DataFrame:
                 "정제단계": row.get(f"{endpoint}_정제단계", "조회실패"),
                 "좌표상태": row.get(status_column, "실패"),
                 "실패원인": row.get(f"{endpoint}_좌표메모", "주소검색 실패"),
+                "입력위도": row.get(f"{endpoint}위도"),
+                "입력경도": row.get(f"{endpoint}경도"),
                 "조회소요시간_초": row.get(f"{endpoint}_조회소요시간_초", None),
             })
             failure_rows.append(failure_row)
     columns = common_columns + [
         "구분", "원본주소", "마지막_API검색어", "정제단계",
-        "좌표상태", "실패원인", "조회소요시간_초",
+        "좌표상태", "실패원인", "입력위도", "입력경도", "조회소요시간_초",
     ]
     failure_df = pd.DataFrame(failure_rows, columns=columns)
     if not failure_df.empty:
-        dedupe_columns = [column for column in ["구분", "원본주소", "차종"] if column in failure_df.columns]
+        dedupe_columns = [column for column in ["구분", "원본주소", "차종", "입력위도", "입력경도"] if column in failure_df.columns]
         failure_df = failure_df.drop_duplicates(subset=dedupe_columns, keep="first").reset_index(drop=True)
     return failure_df
 
@@ -265,7 +268,7 @@ def show_history_page() -> None:
 
 def show_lookup_page() -> None:
     st.title("노선 기초 정보 조회 자동화 Test")
-    st.caption("주소를 입력하거나 엑셀을 업로드하면 거리, 예상시간, 통행료를 조회합니다.")
+    st.caption("주소를 입력하거나 주소·위경도 엑셀을 업로드하면 거리, 예상시간, 통행료를 조회합니다.")
 
     vehicle_options = list(VEHICLE_TYPE_MAP.keys())
     tab_manual, tab_excel = st.tabs(["수기 조회", "엑셀 업로드"])
@@ -299,7 +302,7 @@ def show_lookup_page() -> None:
 
     with tab_excel:
         st.subheader("엑셀 업로드 일괄 조회")
-        st.info("엑셀에는 최소 '출발지', '도착지' 컬럼이 필요합니다. 화면에서 선택한 차종이 일괄 적용됩니다.")
+        st.info("주소 또는 위경도 기반 엑셀을 업로드하세요. 위경도 4개 컬럼이 모두 있으면 좌표를 우선 사용합니다. 화면에서 선택한 차종이 일괄 적용됩니다.")
         sample_df = pd.DataFrame({
             "노선ID": ["R001", "R002"],
             "출발지코드": ["O001", "O002"],
@@ -314,7 +317,19 @@ def show_lookup_page() -> None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-        uploaded_file = st.file_uploader("주소 엑셀 업로드", type=["xlsx"])
+        coordinate_sample = pd.DataFrame({
+            "출발지위도": [37.321, 37.245],
+            "출발지경도": [126.951, 127.412],
+            "도착지위도": [37.245, 37.321],
+            "도착지경도": [127.412, 126.951],
+        })
+        st.download_button(
+            "위경도 샘플 엑셀 다운로드",
+            data=dataframe_to_excel_bytes(coordinate_sample, "좌표목록"),
+            file_name="sample_coordinate_routes.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        uploaded_file = st.file_uploader("주소 또는 위경도 엑셀 업로드", type=["xlsx"])
         if uploaded_file is None:
             return
 
@@ -373,12 +388,13 @@ def show_lookup_page() -> None:
                     selected_vehicles=selected_vehicles,
                     progress_callback=update_progress,
                 )
-                result_df = add_region_columns(result_df)
+                if not COORD_COLUMNS.issubset(input_df.columns):
+                    result_df = add_region_columns(result_df)
                 failure_df = build_failure_dataframe(result_df)
                 result_file = original_workbook_with_results(uploaded_bytes, result_df, failure_df)
 
                 success_count = int((result_df["API상태"] == "OK").sum())
-                failure_count = len(failure_df)
+                failure_count = int((~result_df["API상태"].isin(["OK", "자기지선"])).sum())
                 st.session_state["latest_result"] = (result_file, uploaded_file.name)
                 saved = save_result_file(
                     file_bytes=result_file,
@@ -397,7 +413,7 @@ def show_lookup_page() -> None:
                 )
                 detail_box.empty()
                 st.success(
-                    f"조회 완료: 정상 경로 {success_count}건, 주소 확인 필요 {failure_count}건\n\n"
+                    f"조회 완료: 정상 경로 {success_count}건, 조회 실패 {failure_count}건\n\n"
                     + ("결과를 비공개 클라우드에 저장했습니다." if cloud_enabled() else "결과를 현재 서버에 저장했습니다. 영구 저장소는 아직 연결되지 않았습니다.")
                 )
                 st.dataframe(result_df, width="stretch")
